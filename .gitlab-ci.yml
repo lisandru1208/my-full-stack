@@ -1,0 +1,189 @@
+variables:
+  #variable a mettre en place dans gitlab ci cd
+
+
+stages:
+  - build_backend
+  - build_frontend
+  - tests unitaires backend
+  - test image docker
+  - scan sécurité
+  - docker push
+  - deploy_dev
+  - tests E2E
+  - deploy_preprod
+  - qa (validation E2E)
+  - deploy_prod
+
+build_backend:
+  stage: build_backend
+  when: manual
+  script:
+    # Build the container image
+    - docker build -t "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA" backend/ 
+    # Tag the container image from latest to the commit ref
+    - docker tag "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA"
+
+build_frontend:
+  stage: build_frontend
+  when: manual
+  script:
+    # Build the container image
+    - docker build -t "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA" frontend/ 
+    # Tag the container image from latest to the commit ref
+    - docker tag "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA"
+
+tests_unitaires_backend:
+  stage: tests unitaires backend
+  when: manual
+  image: python:3.10
+  variables:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+  cache:
+    paths:
+      - .cache/pip
+  script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install .
+    - pytest backend/app/tests
+
+run:
+  stage: run
+  when: manual
+  script:
+    # Build the container image
+    - docker run -d -p 80:80 --name backend "$CI_REGISTRY_IMAGE:latest"
+    - sleep 10
+    - curl localhost
+    - docker stop backend
+    - docker rm backend
+
+
+push:
+  stage: push
+  when: manual
+  before_script:
+    - docker info
+    # Login to the Gitlab Container registry
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    # Push the container image
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    # If we are building a tag, push the `latest` container image tag too
+    - if [ ! -z "$CI_COMMIT_TAG" ]; then docker push "$CI_REGISTRY_IMAGE:latest"; fi
+
+
+stop_dev:
+  when: manual
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+  when: manual
+  # Don't stop the "review" for master branch or tags,
+  # it is only for branches (so PRs (most of the time))
+  environment:
+    name: dev-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall app -n $NAMESPACE
+
+stop_staging:
+  stage: deploy_staging
+  variables:
+    NAMESPACE: staging
+  when: manual
+  # Don't stop the "review" for master branch or tags,
+  # it is only for branches (so PRs (most of the time))
+  environment:
+    name: staging-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall app -n $NAMESPACE
+
+stop_prod:
+  stage: deploy_staging
+  variables:
+    NAMESPACE: prod
+  when: manual
+  # Don't stop the "review" for master branch or tags,
+  # it is only for branches (so PRs (most of the time))
+  environment:
+    name: prod-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall app -n $NAMESPACE
+
+deploy_dev:
+  # Use the official docker image.
+  image: docker:latest
+  when: manual
+  environment:
+    name: dev-$CI_BUILD_REF_NAME
+    url: http://$IP_DEV:$NODEPORT_DEV
+    on_stop: stop_dev
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+
+  services:
+    - docker:dind
+  # Default branch leaves tag empty (= latest tag)
+  # All other branches are tagged with the escaped branch name (commit ref slug)
+  script:
+    - rm -Rf ~/.kube
+    - mkdir ~/.kube
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+    - cp fastapi/values.yaml values.yml
+    - sudo helm upgrade --install app fastapi/ --values=values.yml --namespace $NAMESPACE --set image.repository="$CI_REGISTRY_IMAGE" --set image.tag="$CI_COMMIT_SHORT_SHA" --set service.nodeport="$NODEPORT_DEV"
+
+deploy_staging:
+  # Use the official docker image.
+  image: docker:latest
+  when: manual
+  environment:
+    name: staging-$CI_BUILD_REF_NAME
+    url: http://$IP_STAGING:$NODEPORT_STAGING
+    on_stop: stop_staging
+  stage: deploy_staging
+  variables:
+    NAMESPACE: staging
+
+  services:
+    - docker:dind
+  # Default branch leaves tag empty (= latest tag)
+  # All other branches are tagged with the escaped branch name (commit ref slug)
+  script:
+    - rm -Rf ~/.kube
+    - mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+    - cp fastapi/values.yaml values.yml
+    - sudo helm upgrade --install app fastapi/ --values=values.yml --namespace $NAMESPACE --set image.repository="$CI_REGISTRY_IMAGE" --set image.tag="$CI_COMMIT_SHORT_SHA" --set service.nodeport="$NODEPORT_STAGING"
+
+deploy_prod:
+  # Use the official docker image.
+  image: docker:latest
+  when: manual
+  environment:
+    name: prod
+    url: http://$IP_PROD:$NODEPORT_PROD
+  stage: deploy_prod
+  variables:
+    NAMESPACE: prod
+  services:
+    - docker:dind
+  # Default branch leaves tag empty (= latest tag)
+  # All other branches are tagged with the escaped branch name (commit ref slug)
+  script:
+    - rm -Rf ~/.kube
+    - mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+    - cp fastapi/values.yaml values.yml
+    - sudo helm upgrade --install app fastapi/ --values=values.yml --namespace $NAMESPACE --set image.repository="$CI_REGISTRY_IMAGE" --set image.tag="$CI_COMMIT_SHORT_SHA" --set service.nodeport="$NODEPORT_PROD"
